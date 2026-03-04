@@ -3,7 +3,7 @@
 **Andrii Zlotnikov** · Independent Researcher  
 [![ORCID](https://img.shields.io/badge/ORCID-0009--0003--2607--0269-a6ce39?logo=orcid&logoColor=white)](https://orcid.org/0009-0003-2607-0269)
 [![Preprint](https://img.shields.io/badge/Preprint-Zenodo%2018783687-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18783687)
-[![Software](https://img.shields.io/badge/Software-Zenodo%2018822173-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18822173)
+[![Software](https://img.shields.io/badge/Software-Zenodo%2018822173-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18864440)
 
 ---
 
