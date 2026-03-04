@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>BH-FRW Full Evolution Sandbox v0.3</title>
+<style>
+  body { font-family: monospace; background:#0f0f0f; color:#d0d0d0; padding:16px; }
+  #panel { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; background:#1a1a1a; border:1px solid #333; padding:12px; }
+  .ctrl { display:flex; flex-direction:column; gap:4px; }
+  .ctrl label { color:#888; font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+  .ctrl span { color:#fff; font-size:12px; }
+  input[type=range]{ width:150px; accent-color:#4af; }
+  input[type=checkbox]{ width:16px; height:16px; accent-color:#4af; }
+  input[type=checkbox]:disabled { opacity:0.35; cursor:not-allowed; }
+  button{ padding:7px 16px; background:#4af; color:#000; border:none; font-weight:bold; cursor:pointer; }
+  button:hover{ background:#6cf; }
+  button:disabled{ background:#555; color:#888; cursor:not-allowed; }
+  #status{ margin-top:10px; padding:8px 12px; background:#141414; border:1px solid #222; color:#aaa; line-height:1.8; font-size:12px; }
+  #status .metric{ color:#4af; }
+  #status .err{ color:#f84; }
+  #status .warn{ color:#fa4; }
+  #status .hi{ color:#bf7; }
+  #plots{ display:flex; gap:14px; flex-wrap:wrap; margin-top:12px; }
+  canvas{ background:#111; border:1px solid #2a2a2a; }
+  .cap{ color:#666; font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin:6px 0 4px; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <div class="ctrl">
+    <label>log₁₀(M/M☉) <span id="logMVal"></span></label>
+    <input id="logM" type="range" min="15" max="25" step="0.1" />
+  </div>
+
+  <div class="ctrl">
+    <label>Omega_m <span id="omVal"></span></label>
+    <input id="Omega_m" type="range" min="0.10" max="0.60" step="0.01" />
+  </div>
+
+  <div class="ctrl">
+    <label>Omega_r <span id="orVal"></span></label>
+    <input id="Omega_r" type="range" min="0" max="0.01" step="0.0001" />
+  </div>
+
+  <div class="ctrl">
+    <label>H0 <span id="h0Val"></span></label>
+    <input id="H0" type="range" min="50" max="90" step="1" />
+  </div>
+
+  <div class="ctrl">
+    <label>log10(Ec^2) <span id="ecVal"></span></label>
+    <input id="logEc2" type="range" min="2" max="16" step="0.1" />
+  </div>
+
+  <div class="ctrl">
+    <label>dτ <span id="dtVal"></span></label>
+    <input id="dTau" type="range" min="0.0005" max="0.01" step="0.0005" />
+  </div>
+
+  <div class="ctrl">
+    <label>maxSteps <span id="msVal"></span></label>
+    <input id="maxSteps" type="range" min="10000" max="400000" step="10000" />
+  </div>
+
+  <div class="ctrl">
+    <label>Quantum ON</label>
+    <input id="quantumOn" type="checkbox" />
+  </div>
+
+  <div class="ctrl">
+    <label id="stopLabel">Auto-stop at bounce</label>
+    <input id="stopAtBounce" type="checkbox" checked />
+  </div>
+
+  <div class="ctrl">
+    <label>Log scale (a)</label>
+    <input id="logScaleA" type="checkbox" />
+  </div>
+  <div class="ctrl">
+    <label>Log scale (E)</label>
+    <input id="logScaleE" type="checkbox" />
+  </div>
+  <div class="ctrl">
+    <label>Log scale (E²/Ec²)</label>
+    <input id="logScaleR" type="checkbox" />
+  </div>
+
+  <button id="runBtn">Run Full Evolution</button>
+  <button id="csvBtn">Export CSV</button>
+</div>
+
+<div id="status">Press "Run Full Evolution" to compute.</div>
+
+<div id="plots">
+  <div>
+    <div class="cap">a(τ) — scale factor</div>
+    <canvas id="cA" width="440" height="280"></canvas>
+  </div>
+  <div>
+    <div class="cap">E(τ) = H/H₀</div>
+    <canvas id="cH" width="440" height="280"></canvas>
+  </div>
+  <div>
+    <div class="cap">E²/Ec² — approach to bounce boundary</div>
+    <canvas id="cR" width="440" height="280"></canvas>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   BH-FRW Full Evolution Sandbox v0.3
+   Changes from v0.1–v0.2:
+     - Full backward + forward integration (bounce → today → future)
+     - τ axis remapped so τ=0 is at the bounce
+     - Physical time in Gyr: t = τ × (977.8 / H0)
+     - "TODAY" vertical line on all plots
+     - Orange quantum region highlight on ratio plot
+     - sweepMass() utility preserved
+   ============================================================ */
+
+/* ---------- Constants ---------- */
+/* MASS_LOGM is now taken from S.logM (slider) — no hardcoded constant */
+const G    = 6.67430e-11;
+const c    = 299792458;
+const MSUN = 1.98847e30;
+const MPC  = 3.085677581e22;
+// Hubble time conversion: 1/H0 in Gyr when H0 is in km/s/Mpc
+// 1 km/s/Mpc = 1.02271e-3 Gyr^-1  →  977.8 / H0[km/s/Mpc] = Gyr
+const H0_TO_GYR = 977.8;
+
+/* ---------- Cosmology helpers ---------- */
+
+function omegaL0_from_mass(logM, H0_km_s_Mpc){
+  const H0si = H0_km_s_Mpc * 1000.0 / MPC;
+  const M    = Math.pow(10, logM) * MSUN;
+  const Rs   = 2.0 * G * M / (c * c);
+  const Lam  = 1.0 / (Rs * Rs);
+  return (Lam * c * c) / (3.0 * H0si * H0si);
+}
+
+function E2_classical(a, Om, Or, Ol0, Ok){
+  const s = Math.max(a, 1e-30);
+  return Om * Math.pow(s, -3)
+       + Or  * Math.pow(s, -4)
+       + Ol0
+       + Ok  * Math.pow(s, -2);
+}
+
+/* ---------- Safe array min/max (avoids spread-on-large-array RangeError) ---------- */
+function arrMin(arr){ let m=Infinity;    for(let i=0;i<arr.length;i++) if(arr[i]<m) m=arr[i]; return m; }
+function arrMax(arr){ let m=-Infinity;   for(let i=0;i<arr.length;i++) if(arr[i]>m) m=arr[i]; return m; }
+
+/* ============================================================
+   CORE INTEGRATOR
+   Integrates in log-variable u = ln(a) to avoid stiffness.
+
+   du/dτ = -sign × E(exp(u))
+     sign = +1  → backward in time (τ increases into the past, a shrinks)
+     sign = -1  → forward  in time (τ increases into the future, a grows)
+
+   Boundary logic (unchanged from v0.1):
+     QUANTUM: stop at x >= Ec² with reason="bounce_boundary_reached"
+     CLASSICAL: stop at x >= Ec² with reason="classical_breakdown"
+
+   logM defaults to 22.5 for sweepMass() backward-compat; run() always passes S.logM explicitly.
+   ============================================================ */
+function integrate(params, logM = 22.5){
+  const { Om, Or, H0, logEc2, dTau, maxSteps, quantumOn, stopAtBounce } = params;
+
+  const Ol0  = omegaL0_from_mass(logM, H0);
+  const Ok   = 1.0 - Om - Or - Ol0;
+  const Ec2  = Math.pow(10, logEc2);
+  const E2_at1 = E2_classical(1.0, Om, Or, Ol0, Ok);
+
+  let tau = 0.0;
+  let u   = 0.0;   // u = ln(a); a=1 → u=0
+
+  const out = { tau:[], a:[], E:[], ratio:[], mode:[], Ol0, Ok, Ec2, E2_at1 };
+  let reason = "maxSteps";
+
+  for(let i = 0; i < maxSteps; i++){
+
+    const a = Math.exp(u);
+    if(!isFinite(a)){ reason = "invalid_a"; break; }
+
+    const x = E2_classical(a, Om, Or, Ol0, Ok);
+
+    /* ===== CLASSICAL MODE ===== */
+    if(!quantumOn){
+      if(!isFinite(x) || x <= 0){ reason = "invalid_classical"; break; }
+
+      if(x >= Ec2){
+        out.tau.push(tau); out.a.push(a);
+        out.E.push(Math.sqrt(Ec2)); out.ratio.push(1.0); out.mode.push(0);
+        reason = "classical_breakdown";
+        break;
+      }
+
+      const E  = Math.sqrt(x);
+      out.tau.push(tau); out.a.push(a); out.E.push(E);
+      out.ratio.push(x / Ec2); out.mode.push(0);
+
+      // RK2 (Heun): du/dτ = -E  (backward: a decreases as τ increases)
+      const k1     = -E;
+      const u_pred = u + dTau * k1;
+      const a_pred = Math.exp(u_pred);
+      const x_pred = isFinite(a_pred) ? E2_classical(a_pred, Om, Or, Ol0, Ok) : Infinity;
+
+      if(!isFinite(x_pred) || x_pred <= 0 || x_pred >= Ec2){ reason = "classical_breakdown"; break; }
+
+      const k2 = -Math.sqrt(x_pred);
+      u   += dTau * 0.5 * (k1 + k2);
+      tau += dTau;
+      continue;
+    }
+
+    /* ===== QUANTUM MODE ===== */
+    if(!isFinite(x) || x <= 0){ reason = "invalid_classical_input"; break; }
+
+    // Boundary: current point at or past Ec²
+    if(x >= Ec2){
+      out.tau.push(tau); out.a.push(a);
+      out.E.push(0.0); out.ratio.push(1.0); out.mode.push(1);
+      reason = "bounce_boundary_reached";
+      break;
+    }
+
+    const q2 = x * (1.0 - x / Ec2);
+    if(q2 < 0){ reason = "beyond_bounce_boundary"; break; }
+
+    const E = Math.sqrt(q2);
+    out.tau.push(tau); out.a.push(a); out.E.push(E);
+    out.ratio.push(x / Ec2); out.mode.push(1);
+
+    if(stopAtBounce && (x / Ec2) >= 0.9999){ reason = "bounce_boundary_reached"; break; }
+
+    // RK2 (Heun) in quantum mode
+    const k1     = -E;
+    const u_pred = u + dTau * k1;
+    const a_pred = Math.exp(u_pred);
+    const x_pred = isFinite(a_pred) ? E2_classical(a_pred, Om, Or, Ol0, Ok) : Infinity;
+
+    // Boundary crossing on predictor: clamp and stop
+    if(x_pred >= Ec2 || !isFinite(x_pred)){
+      out.tau[out.tau.length-1]   = tau;
+      out.a[out.a.length-1]       = a;
+      out.E[out.E.length-1]       = 0.0;
+      out.ratio[out.ratio.length-1] = 1.0;
+      reason = "bounce_boundary_reached";
+      break;
+    }
+
+    const q2_pred = x_pred * (1.0 - x_pred / Ec2);
+    if(!(q2_pred >= 0 && isFinite(q2_pred))){ reason = "invalid_quantum"; break; }
+
+    const k2 = -Math.sqrt(q2_pred);
+    u   += dTau * 0.5 * (k1 + k2);
+    tau += dTau;
+    // exp(u) always >0; non-finite u caught at top of next iteration
+  }
+
+  return { out, reason };
+}
+
+/* ============================================================
+   FORWARD INTEGRATOR
+   Starting from u0 = ln(a_bounce), integrates forward in cosmic time.
+   du/dτ = +E  (a grows as τ_fwd increases)
+   Stops when a >= a_stop (default 1.2) or maxSteps exhausted.
+   Returns arrays in the SAME format as integrate().
+   ============================================================ */
+function integrateForward(params, u0, a_stop = 1.2, logM = 22.5){
+  const { Om, Or, H0, logEc2, dTau, maxSteps, quantumOn } = params;
+
+  const Ol0 = omegaL0_from_mass(logM, H0);
+  const Ok  = 1.0 - Om - Or - Ol0;
+  const Ec2 = Math.pow(10, logEc2);
+
+  let tau = 0.0;
+  let u   = u0;
+
+  const out = { tau:[], a:[], E:[], ratio:[], mode:[] };
+  let reason = "maxSteps";
+
+  for(let i = 0; i < maxSteps; i++){
+    const a = Math.exp(u);
+    if(!isFinite(a)){ reason = "invalid_a_fwd"; break; }
+    if(a >= a_stop){ reason = "a_stop_reached"; break; }
+
+    const x = E2_classical(a, Om, Or, Ol0, Ok);
+    if(!isFinite(x) || x <= 0){ reason = "invalid_classical_fwd"; break; }
+
+    let E, modeVal;
+
+    if(quantumOn){
+      // In forward pass we start from the bounce, so x starts near Ec² and drops.
+      // We keep the LQC correction active while x > 0.
+      const q2 = x * (1.0 - x / Ec2);
+      if(q2 < 0){
+        // x has grown above Ec² again (shouldn't happen in forward pass, but guard it)
+        reason = "fwd_boundary";
+        break;
+      }
+      E = Math.sqrt(q2);
+      modeVal = 1;
+    } else {
+      E = Math.sqrt(x);
+      modeVal = 0;
+    }
+
+    out.tau.push(tau); out.a.push(a); out.E.push(E);
+    out.ratio.push(x / Ec2); out.mode.push(modeVal);
+
+    // RK2 (Heun): du/dτ = +E  (forward: a increases as τ increases)
+    const k1     = +E;
+    const u_pred = u + dTau * k1;
+    const a_pred = Math.exp(u_pred);
+
+    if(!isFinite(a_pred)){ reason = "invalid_a_fwd"; break; }
+
+    const x_pred = E2_classical(a_pred, Om, Or, Ol0, Ok);
+    if(!isFinite(x_pred) || x_pred <= 0){ reason = "invalid_classical_fwd"; break; }
+
+    let k2;
+    if(quantumOn){
+      const q2p = x_pred * (1.0 - x_pred / Ec2);
+      k2 = (q2p >= 0 && isFinite(q2p)) ? +Math.sqrt(q2p) : +Math.sqrt(x_pred);
+    } else {
+      k2 = +Math.sqrt(x_pred);
+    }
+
+    u   += dTau * 0.5 * (k1 + k2);
+    tau += dTau;
+  }
+
+  return { out, reason };
+}
+
+/* ============================================================
+   FULL EVOLUTION: backward (past) + forward (future)
+   Returns a single combined trajectory with τ=0 at the bounce.
+   "today" marker is at τ = tau_today (where a ≈ 1).
+   ============================================================ */
+function runFullEvolution(params){
+  const logM = params.logM != null ? params.logM : 22.5;
+
+  /* --- Step 1: backward pass (a=1 → bounce) --- */
+  const { out: back, reason: reasonBack } = integrate(params, logM);
+
+  const n_back     = back.tau.length;
+  const tau_back   = n_back > 0 ? back.tau[n_back - 1] : 0; // lookback time to bounce
+  const u_bounce   = n_back > 0 ? Math.log(back.a[n_back - 1]) : 0;
+
+  /* --- Step 2: forward pass (bounce → a=1.2) --- */
+  const { out: fwd, reason: reasonFwd } = integrateForward(params, u_bounce, 1.2, logM);
+
+  /* --- Step 3: combine, remap τ so τ=0 at bounce ---
+       backward array:  τ_new = tau_back - τ_old  (reversal)
+       forward array:   τ_new = τ_fwd              (already starts at 0)
+       "today" is at τ_new = tau_back (the point where a=1 in the backward pass)
+  */
+  const combined = {
+    tau:   [],
+    a:     [],
+    E:     [],
+    ratio: [],
+    mode:  [],
+    // pass-through metadata
+    Ol0:   back.Ol0,
+    Ok:    back.Ok,
+    Ec2:   back.Ec2,
+    E2_at1: back.E2_at1,
+    // markers
+    tau_today:  tau_back,           // τ where a=1 in combined axis
+    tau_bounce: 0,                  // τ=0 is the bounce by definition
+    tau_fwd_end: tau_back + (fwd.tau.length > 0 ? fwd.tau[fwd.tau.length-1] : 0),
+    reasonBack,
+    reasonFwd,
+  };
+
+  // Backward segment: reverse order so τ increases from bounce → today
+  for(let i = n_back - 1; i >= 0; i--){
+    combined.tau.push(tau_back - back.tau[i]);
+    combined.a.push(back.a[i]);
+    combined.E.push(back.E[i]);
+    combined.ratio.push(back.ratio[i]);
+    combined.mode.push(back.mode[i]);
+  }
+
+  // Forward segment: offset τ by tau_back so today is continuous
+  for(let i = 0; i < fwd.tau.length; i++){
+    combined.tau.push(tau_back + fwd.tau[i]);
+    combined.a.push(fwd.a[i]);
+    combined.E.push(fwd.E[i]);
+    combined.ratio.push(fwd.ratio[i]);
+    combined.mode.push(fwd.mode[i]);
+  }
+
+  return combined;
+}
+
+/* ============================================================
+   MASS SWEEP UTILITY (preserved from v0.1, callable from console)
+   Usage: const r = sweepMass(S, 10, 30, 0.5); console.table(r);
+   ============================================================ */
+function sweepMass(params, logM_min, logM_max, dLogM){
+  const results = [];
+  for(let logM = logM_min; logM <= logM_max + 1e-9; logM += dLogM){
+    const logM_r = Math.round(logM * 1e6) / 1e6;
+    const { out, reason } = integrate(params, logM_r);
+    const n = out.tau.length;
+    results.push({
+      logM: logM_r, OmegaL0: out.Ol0, OmegaK: out.Ok,
+      a_end: n > 0 ? out.a[n-1] : NaN,
+      tau_end: n > 0 ? out.tau[n-1] : NaN,
+      reason, steps: n
+    });
+  }
+  console.table(results);
+  return results;
+}
+
+// --- Added: acceleration transition calculation ---
+/* ============================================================
+   ACCELERATION TRANSITION  z_acc
+   ä > 0  iff  ä/a > 0  iff  H^2 + H_dot > 0
+   In H0-normalised units: ä/a proportional to E^2 + dE/dtau.
+   We estimate dE/dtau with centred finite differences on the
+   combined trajectory, then find the first sign change of
+   (E^2 + dE/dtau) from negative to positive (deceleration to acceleration).
+   Returns { z_acc, a_acc } or null if no transition found.
+   ============================================================ */
+function computeAccelTransition(traj){
+  const tau = traj.tau;
+  const E   = traj.E;
+  const a   = traj.a;
+  const n   = tau.length;
+  if(n < 3) return null;
+
+  // Build accel proxy array using centred differences for dE/dtau
+  const accel = new Array(n).fill(NaN);
+  for(let i = 1; i < n - 1; i++){
+    const dtFwd = tau[i+1] - tau[i];
+    const dtBwd = tau[i]   - tau[i-1];
+    if(dtFwd <= 0 || dtBwd <= 0) continue;
+    // centred difference (non-uniform spacing)
+    const dEdTau = (E[i+1] - E[i-1]) / (dtFwd + dtBwd);
+    accel[i] = E[i] * E[i] + dEdTau;
+  }
+  // Forward difference for first point, backward for last
+  if(tau[1] > tau[0])
+    accel[0] = E[0]*E[0] + (E[1]-E[0])/(tau[1]-tau[0]);
+  if(tau[n-1] > tau[n-2])
+    accel[n-1] = E[n-1]*E[n-1] + (E[n-1]-E[n-2])/(tau[n-1]-tau[n-2]);
+
+  // Find first crossing: accel[i-1] < 0  and  accel[i] >= 0
+  for(let i = 1; i < n; i++){
+    if(!isFinite(accel[i-1]) || !isFinite(accel[i])) continue;
+    if(accel[i-1] < 0 && accel[i] >= 0){
+      // Linear interpolation for precise crossing location
+      const frac = -accel[i-1] / (accel[i] - accel[i-1]);
+      const a_acc = a[i-1] + frac * (a[i] - a[i-1]);
+      if(a_acc > 0 && isFinite(a_acc)){
+        return { z_acc: (1.0 / a_acc) - 1.0, a_acc };
+      }
+    }
+  }
+  return null;  // no transition found in trajectory
+}
+// --- End: acceleration transition calculation ---
+
+/* ============================================================
+   PLOT HELPER
+   Draws one canvas with:
+     - Blue line for the full trajectory
+     - Orange fill+dots for quantum-mode points (mode === 1)
+     - Red dashed vertical line at tau=tau_today
+     - Optional horizontal reference line at y=yRef
+     - Added: a=1 horizontal marker (marker1 flag, a-plot only)
+     - Added: log10 Y-axis mode (logY flag, a-plot only)
+   ============================================================ */
+function drawPlot(canvas, tau, y, yLabel, mode, tau_today, yRef = null,
+                  logY = false, marker1 = false, epochs = []){
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const pad = { l:50, r:16, t:16, b:30 };
+  const PW = W - pad.l - pad.r;
+  const PH = H - pad.t - pad.b;
+
+  // Border
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.strokeRect(pad.l, pad.t, PW, PH);
+
+  if(tau.length < 2) return;
+
+  const xmin = arrMin(tau), xmax = arrMax(tau);
+
+  // --- Added: log scale toggle ---
+  // When logY=true, map y values through log10 for display only.
+  // Stored data is NEVER modified.
+  const yDisp = logY
+    ? y.map(v => (v > 0 ? Math.log10(v) : NaN))
+    : y;
+  const dispLabel = logY ? "log10(" + yLabel + ")" : yLabel;
+
+  const finite_yDisp = yDisp.filter(v => isFinite(v));
+  let ymin = arrMin(finite_yDisp);
+  let ymax = arrMax(finite_yDisp);
+  if(!isFinite(ymin) || !isFinite(ymax) || ymin === ymax){ ymin -= 1; ymax += 1; }
+  const ypad = (ymax - ymin) * 0.05;
+  ymax += ypad;
+
+  const xR = xmax - xmin || 1;
+  const yR = ymax - ymin || 1;
+
+  function X(v){ return pad.l + (v - xmin) / xR * PW; }
+  function Y(v){ return H - pad.b - (v - ymin) / yR * PH; }
+
+  // --- Axis labels ---
+  ctx.fillStyle = "#666"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+  ctx.fillText("\u03c4 (H\u2080\u207b\u00b9 units, \u03c4=0 at bounce)", pad.l + PW / 2, H - 6);
+  ctx.save();
+  ctx.translate(13, pad.t + PH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(dispLabel, 0, 0);
+  ctx.restore();
+
+  // --- Secondary Gyr ticks on x-axis (top edge) ---
+  // Only drawn if H0_TO_GYR and S.H0 are accessible (they are globals)
+  if(typeof H0_TO_GYR !== "undefined" && typeof S !== "undefined" && S.H0 > 0){
+    const tau2gyr = t => t * H0_TO_GYR / S.H0;
+    const tauMax = xmax - xmin;
+    const gyrMax = tau2gyr(tauMax);
+    // Pick a round step
+    const rawStep = gyrMax / 5;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const niceStep = Math.ceil(rawStep / mag) * mag;
+    ctx.fillStyle = "rgba(150,150,150,0.6)";
+    ctx.font = "8px monospace";
+    ctx.textAlign = "center";
+    for(let gyr = 0; gyr <= gyrMax + niceStep * 0.01; gyr += niceStep){
+      const tauVal = gyr / (H0_TO_GYR / S.H0);
+      const px = X(xmin + tauVal);
+      if(px < pad.l || px > pad.l + PW) continue;
+      ctx.fillText(gyr.toFixed(0) + "G", px, pad.t + 9);
+    }
+    ctx.fillStyle = "rgba(120,120,120,0.5)";
+    ctx.font = "8px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText("Gyr→", pad.l + PW, pad.t + 9);
+  }
+  // --- End secondary Gyr ticks ---
+
+  // --- Optional horizontal reference line ---
+  if(yRef !== null){
+    const yRefDisp = logY ? (yRef > 0 ? Math.log10(yRef) : null) : yRef;
+    if(yRefDisp !== null && yRefDisp >= ymin && yRefDisp <= ymax){
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, Y(yRefDisp));
+      ctx.lineTo(pad.l + PW, Y(yRefDisp));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // --- Orange fill/dots for quantum region (mode===1) ---
+  if(mode){
+    ctx.fillStyle = "rgba(255,100,40,0.18)";
+    let qStart = -1;
+    for(let i = 0; i <= tau.length; i++){
+      const inQ = i < tau.length && mode[i] === 1;
+      if(inQ && qStart < 0){ qStart = i; }
+      if(!inQ && qStart >= 0){
+        const x0 = X(tau[qStart]), x1 = X(tau[i - 1]);
+        ctx.fillRect(x0, pad.t, x1 - x0, PH);
+        qStart = -1;
+      }
+    }
+  }
+
+  // --- Main trajectory line ---
+  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = "#4af";
+  ctx.beginPath();
+  let started = false;
+  for(let i = 0; i < tau.length; i++){
+    const px = X(tau[i]), py = Y(yDisp[i]);
+    if(!isFinite(px) || !isFinite(py)){ started = false; continue; }
+    if(!started){ ctx.moveTo(px, py); started = true; }
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // --- Quantum dots on top of line ---
+  if(mode){
+    ctx.fillStyle = "#f74";
+    for(let i = 0; i < tau.length; i++){
+      if(mode[i] !== 1) continue;
+      const px = X(tau[i]), py = Y(yDisp[i]);
+      if(!isFinite(px) || !isFinite(py)) continue;
+      ctx.fillRect(px - 1, py - 1, 2, 2);
+    }
+  }
+
+  // --- Added: a=1 horizontal marker ---
+  // Only drawn when marker1=true (a-plot). Omitted if a=1 is outside y range.
+  if(marker1){
+    const aRef = logY ? 0.0 : 1.0;   // log10(1) = 0
+    if(aRef >= ymin && aRef <= ymax){
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = "rgba(180,255,140,0.55)";
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, Y(aRef));
+      ctx.lineTo(pad.l + PW, Y(aRef));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(180,255,140,0.72)";
+      ctx.font = "9px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText("a = 1 (Today)", pad.l + PW - 2, Y(aRef) - 3);
+      ctx.restore();
+    }
+  }
+  // --- End: a=1 marker ---
+
+  // --- Epoch markers (vertical lines with labels) ---
+  // Each epoch: { tau, label, color }
+  for(const ep of epochs){
+    if(!isFinite(ep.tau)) continue;
+    const ex = X(ep.tau);
+    if(ex < pad.l || ex > pad.l + PW) continue;
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = ep.color || "rgba(200,200,100,0.5)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(ex, pad.t);
+    ctx.lineTo(ex, pad.t + PH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = ep.color || "rgba(200,200,100,0.8)";
+    ctx.font = "8px monospace";
+    ctx.textAlign = "center";
+    // Alternate label height to avoid overlap
+    const labelY = (ep.alt) ? pad.t + PH - 14 : pad.t + 20;
+    ctx.fillText(ep.label, ex, labelY);
+    ctx.restore();
+  }
+  // --- End epoch markers ---
+
+  // --- TODAY vertical dashed red line ---
+  if(tau_today !== null && isFinite(tau_today)){
+    const tx = X(tau_today);
+    if(tx >= pad.l && tx <= pad.l + PW){
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "#f44";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(tx, pad.t);
+      ctx.lineTo(tx, pad.t + PH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#f44";
+      ctx.font = "9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("TODAY", tx, pad.t + 10);
+      ctx.restore();
+    }
+  }
+}
+/* ============================================================
+   UI STATE & WIRING
+   ============================================================ */
+const S = {
+  logM: 22.5,
+  Om: 0.30, Or: 1e-4, H0: 70, logEc2: 8.0,
+  dTau: 0.001, maxSteps: 200000,
+  quantumOn: true, stopAtBounce: true,
+  logScaleA: false,
+  logScaleE: false,
+  logScaleR: false
+};
+
+function sync(){
+  document.getElementById("logM").value        = S.logM;
+  document.getElementById("logMVal").textContent = S.logM.toFixed(1);
+  document.getElementById("Omega_m").value   = S.Om;
+  document.getElementById("Omega_r").value   = S.Or;
+  document.getElementById("H0").value        = S.H0;
+  document.getElementById("logEc2").value    = S.logEc2;
+  document.getElementById("dTau").value      = S.dTau;
+  document.getElementById("maxSteps").value  = S.maxSteps;
+  document.getElementById("quantumOn").checked    = S.quantumOn;
+  document.getElementById("stopAtBounce").checked = S.stopAtBounce;
+
+  document.getElementById("omVal").textContent  = S.Om.toFixed(2);
+  document.getElementById("orVal").textContent  = S.Or.toExponential(1);
+  document.getElementById("h0Val").textContent  = S.H0.toFixed(0);
+  document.getElementById("ecVal").textContent  = S.logEc2.toFixed(1);
+  document.getElementById("dtVal").textContent  = S.dTau.toFixed(4);
+  document.getElementById("msVal").textContent  = String(S.maxSteps);
+
+  const sbEl = document.getElementById("stopAtBounce");
+  sbEl.disabled = !S.quantumOn;
+  document.getElementById("stopLabel").style.color = S.quantumOn ? "#888" : "#444";
+  // --- Added: log scale toggle sync ---
+  document.getElementById("logScaleA").checked = S.logScaleA;
+  document.getElementById("logScaleE").checked = S.logScaleE;
+  document.getElementById("logScaleR").checked = S.logScaleR;
+}
+
+function bind(){
+  document.getElementById("logM").addEventListener("input",      e=>{ S.logM=parseFloat(e.target.value); sync(); });
+  document.getElementById("Omega_m").addEventListener("input",   e=>{ S.Om=parseFloat(e.target.value); sync(); });
+  document.getElementById("Omega_r").addEventListener("input",   e=>{ S.Or=parseFloat(e.target.value); sync(); });
+  document.getElementById("H0").addEventListener("input",        e=>{ S.H0=parseFloat(e.target.value); sync(); });
+  document.getElementById("logEc2").addEventListener("input",    e=>{ S.logEc2=parseFloat(e.target.value); sync(); });
+  document.getElementById("dTau").addEventListener("input",      e=>{ S.dTau=parseFloat(e.target.value); sync(); });
+  document.getElementById("maxSteps").addEventListener("input",  e=>{ S.maxSteps=parseInt(e.target.value,10); sync(); });
+  document.getElementById("quantumOn").addEventListener("change",e=>{ S.quantumOn=e.target.checked; sync(); });
+  document.getElementById("stopAtBounce").addEventListener("change",e=>{ S.stopAtBounce=e.target.checked; });
+  // --- Added: log scale toggle bind ---
+  document.getElementById("logScaleA").addEventListener("change",e=>{ S.logScaleA=e.target.checked; });
+  document.getElementById("logScaleE").addEventListener("change",e=>{ S.logScaleE=e.target.checked; });
+  document.getElementById("logScaleR").addEventListener("change",e=>{ S.logScaleR=e.target.checked; });
+  document.getElementById("runBtn").addEventListener("click", run);
+  document.getElementById("csvBtn").addEventListener("click", exportCSV);
+}
+
+let lastRun = null;
+
+function run(){
+  const runBtn = document.getElementById("runBtn");
+  const status = document.getElementById("status");
+  runBtn.disabled = true;
+  runBtn.textContent = "Computing…";
+  status.innerHTML = `<span class="metric">Running full evolution…</span>`;
+
+  setTimeout(() => {
+    try {
+      const traj = runFullEvolution({ ...S });
+      lastRun = { traj, params: { ...S } };
+
+      if(traj.tau.length < 2){
+        status.innerHTML = `<span class="err">No trajectory. Back: ${traj.reasonBack} | Fwd: ${traj.reasonFwd}</span>`;
+        return;
+      }
+
+      const tt = traj.tau_today;
+
+      // --- Added: log scale toggle applied to a-plot only ---
+      const logY = S.logScaleA;
+
+      // Physical times
+      const tGyr_today = tt * H0_TO_GYR / S.H0;
+      const tGyr_total = traj.tau_fwd_end * H0_TO_GYR / S.H0;
+
+      // Ω_k is auto-derived inside integrate() as 1 - Om - Or - OmegaL0(M)
+      // so E²(a=1) = 1 is guaranteed by construction — no warning needed.
+
+      // accelResult must be computed before epoch markers use it
+      const accelResult = computeAccelTransition(traj);
+      const zAccStr = accelResult
+        ? `z_acc = <span class="metric">${accelResult.z_acc.toFixed(3)}</span>`
+          + ` &nbsp; (a_acc = <span class="metric">${accelResult.a_acc.toFixed(4)}</span>)`
+        : `z_acc = <span class="warn">No acceleration transition found</span>`;
+
+      // --- Compute epoch markers ---
+      function findTauAtA(aTarget){
+        const arr = traj.a;
+        for(let i = 1; i < arr.length; i++){
+          if((arr[i-1] <= aTarget && arr[i] >= aTarget) ||
+             (arr[i-1] >= aTarget && arr[i] <= aTarget)){
+            const frac = (aTarget - arr[i-1]) / (arr[i] - arr[i-1]);
+            return traj.tau[i-1] + frac * (traj.tau[i] - traj.tau[i-1]);
+          }
+        }
+        return NaN;
+      }
+
+      const a_eq = (traj.Ol0 > 0) ? S.Or / S.Om : NaN;
+      const a_mL = (traj.Ol0 > 0) ? Math.pow(S.Om / traj.Ol0, 1/3) : NaN;
+      const aAcc = accelResult ? accelResult.a_acc : NaN;
+
+      const tau_eq  = findTauAtA(a_eq);
+      const tau_mL  = findTauAtA(a_mL);
+      const tau_acc = accelResult ? findTauAtA(aAcc) : NaN;
+
+      const tGyr = tau => tau * H0_TO_GYR / S.H0;
+
+      const epochs = [];
+      if(isFinite(tau_eq))
+        epochs.push({ tau: tau_eq,  label: `rad-mat eq\n${tGyr(tau_eq).toFixed(1)}Gyr`,  color: "rgba(100,200,255,0.6)", alt: false });
+      if(isFinite(tau_mL))
+        epochs.push({ tau: tau_mL,  label: `mat-Λ eq\n${tGyr(tau_mL).toFixed(1)}Gyr`,   color: "rgba(255,200,80,0.6)",  alt: true  });
+      if(isFinite(tau_acc))
+        epochs.push({ tau: tau_acc, label: `accel\n${tGyr(tau_acc).toFixed(1)}Gyr`,      color: "rgba(150,255,150,0.6)", alt: false });
+      // --- End epoch markers ---
+
+      drawPlot(document.getElementById("cA"), traj.tau, traj.a,     "a",        traj.mode, tt, 1.0, S.logScaleA, true,  epochs);
+      drawPlot(document.getElementById("cH"), traj.tau, traj.E,     "E = H/H₀", traj.mode, tt, 1.0, S.logScaleE, false, epochs);
+      drawPlot(document.getElementById("cR"), traj.tau, traj.ratio, "E²/Ec²",   traj.mode, tt, 1.0, S.logScaleR, false, []);
+
+      const modeLabel = S.quantumOn ? "QUANTUM+FWD" : "CLASSICAL+FWD";
+      const tGyr_bounce_to_today = tGyr_today.toFixed(2);
+
+      status.innerHTML =
+          `mode = <span class="metric">${modeLabel}</span>`
+        + `&nbsp; back_stop = <span class="metric">${traj.reasonBack}</span>`
+        + `&nbsp; fwd_stop = <span class="metric">${traj.reasonFwd}</span>`
+        + `<br>log₁₀(M/M☉) = <span class="metric">${S.logM.toFixed(1)}</span>`
+        + ` → Ω_Λ ≈ <span class="metric">${traj.Ol0.toExponential(3)}</span>`
+        + ` &nbsp; Ω_k ≈ <span class="metric">${traj.Ok.toFixed(4)}</span>`
+        + ` &nbsp; Ec² = <span class="metric">10^${S.logEc2.toFixed(1)}</span>`
+        + `<br>τ_bounce = <span class="metric">0</span> <span style="color:#3d5470">(phase boundary — not a singularity)</span>`
+        + ` &nbsp; τ_today = <span class="metric">${tt.toFixed(4)}</span>`
+        + ` &nbsp; τ_end = <span class="metric">${traj.tau_fwd_end.toFixed(4)}</span>`
+        + `<br>⏱ Bounce → Today: <span class="hi">${tGyr_bounce_to_today} Gyr</span>`
+        + ` &nbsp; Total evolution: <span class="hi">${tGyr_total.toFixed(2)} Gyr</span>`
+        + ` &nbsp; steps = <span class="metric">${traj.tau.length}</span>`
+        + `<br>` + zAccStr;
+
+    } catch(err){
+      status.innerHTML = `<span class="err">Runtime error: ${err.message}</span>`;
+      console.error(err);
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = "Run Full Evolution";
+    }
+  }, 20);
+}
+
+/* ============================================================
+   CSV EXPORT — full combined trajectory with parameters header
+   ============================================================ */
+function exportCSV(){
+  if(!lastRun){ alert("Run the model first."); return; }
+  const { traj, params } = lastRun;
+  const rows = [];
+
+  rows.push(`# BH-FRW Full Evolution Sandbox v0.3`);
+  rows.push(`# log10(M/Msun)=${params.logM != null ? params.logM : 22.5}`);
+  rows.push(`# Om=${params.Om}, Or=${params.Or}, H0=${params.H0}`);
+  rows.push(`# log10(Ec2)=${params.logEc2}, dTau=${params.dTau}, maxSteps=${params.maxSteps}`);
+  rows.push(`# mode=${params.quantumOn ? "QUANTUM" : "CLASSICAL"}, stopAtBounce=${params.stopAtBounce}`);
+  rows.push(`# OmegaL0=${traj.Ol0.toExponential(6)}, OmegaK=${traj.Ok.toFixed(6)}`);
+  rows.push(`# tau_today=${traj.tau_today.toFixed(6)} (where a=1)`);
+  rows.push(`# t_today_Gyr=${(traj.tau_today * H0_TO_GYR / params.H0).toFixed(3)}`);
+  rows.push(`# back_reason=${traj.reasonBack}, fwd_reason=${traj.reasonFwd}`);
+  rows.push(`# tau=0 at bounce; tau=tau_today at a=1 (today); tau increases into future`);
+  rows.push(`# ---`);
+  rows.push(["tau","a","E","E2_over_Ec2","mode"].join(","));
+
+  for(let i = 0; i < traj.tau.length; i++){
+    rows.push([
+      traj.tau[i].toExponential(8),
+      traj.a[i].toExponential(8),
+      traj.E[i].toExponential(8),
+      traj.ratio[i].toExponential(8),
+      traj.mode[i]
+    ].join(","));
+  }
+
+  const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `bh_frw_full_logM${params.logM != null ? params.logM : 22.5}_Ec1e${params.logEc2}_${params.quantumOn?"Q":"C"}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+sync(); bind(); run();
+</script>
+</body>
+</html>
