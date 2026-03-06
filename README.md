@@ -3,7 +3,7 @@
 **Andrii Zlotnikov** · Independent Researcher  
 [![ORCID](https://img.shields.io/badge/ORCID-0009--0003--2607--0269-a6ce39?logo=orcid&logoColor=white)](https://orcid.org/0009-0003-2607-0269)
 [![Preprint](https://img.shields.io/badge/Preprint-Zenodo%2018783687-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18783687)
-[![Software](https://img.shields.io/badge/Software-Zenodo%2018822173-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18864440)
+[![Software](https://img.shields.io/badge/Software-Zenodo%2018822173-4fa3d1?logo=zenodo&logoColor=white)](https://doi.org/10.5281/zenodo.18822173)
 
 ---
 
@@ -35,7 +35,7 @@ Numerical integration of the FRW sector reveals a narrow parent-mass window (log
 
 This selection effect arises from internal FRW consistency constraints and is presented as a structural observation, not an observational fit or prediction.
 
-Diagnostic runs using the accretion-driver interface (V2 exponential engine) further show that introducing a phenomenological coupling at moderate strength produces a dynamical equation of state overlapping with the w₀–wₐ confidence region reported by current DESI constraints — while maintaining Ω_Λ ≈ 0.70 and t₀ ≈ 13.3 Gyr. This is noted as a structural feature of the driver form, not a prediction.
+Diagnostic runs using the accretion-driver interface (V2 exponential engine) show that introducing a phenomenological coupling at moderate strength produces dynamical w(z) trajectories departing from the ΛCDM point. These runs were obtained at log₁₀ M = 6, outside the physically motivated mass range of the framework. At the physically consistent mass scale (log₁₀ M ≈ 22–23) the accretion driver degenerates and the model returns to exact ΛCDM. No self-consistent dynamical dark energy result has been demonstrated within the physical mass window. The driver interface is retained as a methodological record, not as evidence for observational compatibility.
 
 ---
 
@@ -75,7 +75,7 @@ Primary tool. Integrates FRW dynamics from an effective quantum bounce to late-t
 
 Diagnostic interface for phenomenological exploration of dynamical dark energy within the BH-vacuum framework. Superimposes an accretion-coupling driver on the geometric baseline Λ = 1/Rs² and integrates the resulting w(z) trajectory for CPL comparison (w₀, wₐ, χ² vs ΛCDM).
 
-The current default uses an exponential driver (V2 engine) which at moderate coupling strengths produces a dynamical equation of state overlapping with current DESI constraints (w₀ ≈ −0.84, wₐ < 0, phantom crossing at z ≈ 0.5, t₀ ≈ 13.3 Gyr). This is a structural observation, not a fit. The driver parametrization is external to the core geometric framework.
+**Note:** Non-trivial w(z) dynamics in this tool are only accessible at mass scales (log₁₀ M ≪ 20) inconsistent with the core geometric framework. At the physically motivated mass scale (log₁₀ M ≈ 22–23), the accretion driver vanishes and the model is exactly ΛCDM. The driver parametrization is external to the core geometric framework and the representative runs are not physical predictions.
 
 ---
 
